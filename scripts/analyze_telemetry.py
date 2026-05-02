@@ -57,9 +57,15 @@ def summarize(path: Path) -> str:
     for event_type, payload in payloads:
         if event_type == "market_window":
             latest_markets[str(payload.get("slug"))] = payload
-    missing_price_to_beat = [
+    latest_ts = max((int(event.get("ts_ms") or 0) for event in events), default=0) / 1000.0
+    current_markets = [
         market
         for market in latest_markets.values()
+        if _float_or_zero(market.get("start_ts")) <= latest_ts < _float_or_zero(market.get("end_ts"))
+    ]
+    missing_price_to_beat = [
+        market
+        for market in current_markets
         if market.get("active") and not market.get("closed") and market.get("price_to_beat") is None
     ]
 
@@ -112,7 +118,8 @@ def summarize(path: Path) -> str:
             "",
             "## Market Readiness",
             f"- latest markets: {len(latest_markets)}",
-            f"- active open markets missing price_to_beat: {len(missing_price_to_beat)}",
+            f"- current-window markets: {len(current_markets)}",
+            f"- current active open markets missing price_to_beat: {len(missing_price_to_beat)}",
         ]
     )
     for market in missing_price_to_beat[:20]:
@@ -152,6 +159,13 @@ def percentile_line(name: str, values: list[float]) -> str:
 
 def fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.3f}"
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def main() -> None:

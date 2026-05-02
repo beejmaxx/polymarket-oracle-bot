@@ -46,48 +46,69 @@ class SignalEngine:
 
         distance_bps = ((tick.price / market.price_to_beat) - 1.0) * 10_000.0
         signed_distance = distance_bps if outcome == "Up" else -distance_bps
-        if signed_distance < self.risk.min_signal_distance_bps:
-            return None
-
         ask = quote.best_ask
+        if now_ms - tick.received_ts_ms > self.risk.max_tick_age_ms:
+            return self._rejected_signal(
+                market,
+                tick,
+                outcome,
+                token_id,
+                signed_distance,
+                ask,
+                -1.0,
+                "oracle tick stale",
+                now_ms,
+            )
+        if tick.received_ts_ms - tick.feed_ts_ms > self.risk.max_tick_feed_lag_ms:
+            return self._rejected_signal(
+                market,
+                tick,
+                outcome,
+                token_id,
+                signed_distance,
+                ask,
+                -1.0,
+                "oracle feed lag above limit",
+                now_ms,
+            )
+        if signed_distance < self.risk.min_signal_distance_bps:
+            return self._rejected_signal(
+                market,
+                tick,
+                outcome,
+                token_id,
+                signed_distance,
+                ask,
+                -1.0,
+                "distance below threshold",
+                now_ms,
+            )
         if ask < self.risk.min_entry_price or ask > self.risk.max_entry_price:
-            return Signal(
-                asset=market.asset,
-                slug=market.slug,
-                condition_id=market.condition_id,
-                start_ts=market.start_ts,
-                end_ts=market.end_ts,
-                outcome=outcome,
-                token_id=token_id,
-                price_to_beat=market.price_to_beat,
-                observed_price=tick.price,
-                distance_bps=signed_distance,
-                estimated_prob=self.estimate_probability(signed_distance),
-                ask_price=ask,
-                edge=-1.0,
-                reason="quote outside configured price band",
-                created_at_ms=now_ms,
+            return self._rejected_signal(
+                market,
+                tick,
+                outcome,
+                token_id,
+                signed_distance,
+                ask,
+                -1.0,
+                "quote outside configured price band",
+                now_ms,
             )
 
         probability = self.estimate_probability(signed_distance)
         edge = probability - ask
         if edge < self.risk.min_probability_edge:
-            return Signal(
-                asset=market.asset,
-                slug=market.slug,
-                condition_id=market.condition_id,
-                start_ts=market.start_ts,
-                end_ts=market.end_ts,
-                outcome=outcome,
-                token_id=token_id,
-                price_to_beat=market.price_to_beat,
-                observed_price=tick.price,
-                distance_bps=signed_distance,
-                estimated_prob=probability,
-                ask_price=ask,
-                edge=edge,
-                reason="edge below threshold",
-                created_at_ms=now_ms,
+            return self._rejected_signal(
+                market,
+                tick,
+                outcome,
+                token_id,
+                signed_distance,
+                ask,
+                edge,
+                "edge below threshold",
+                now_ms,
             )
 
         return Signal(
@@ -108,3 +129,32 @@ class SignalEngine:
             created_at_ms=now_ms,
         )
 
+    def _rejected_signal(
+        self,
+        market: MarketWindow,
+        tick: PriceTick,
+        outcome: Outcome,
+        token_id: str,
+        signed_distance: float,
+        ask: float,
+        edge: float,
+        reason: str,
+        now_ms: int,
+    ) -> Signal:
+        return Signal(
+            asset=market.asset,
+            slug=market.slug,
+            condition_id=market.condition_id,
+            start_ts=market.start_ts,
+            end_ts=market.end_ts,
+            outcome=outcome,
+            token_id=token_id,
+            price_to_beat=market.price_to_beat or 0.0,
+            observed_price=tick.price,
+            distance_bps=signed_distance,
+            estimated_prob=self.estimate_probability(signed_distance),
+            ask_price=ask,
+            edge=edge,
+            reason=reason,
+            created_at_ms=now_ms,
+        )

@@ -30,6 +30,10 @@ min_entry_price = 0.05
 max_entry_price = 0.92
 min_elapsed_seconds = 1.0
 max_seconds_to_expiry = 8.0
+max_open_exposure_usd = 100.0
+max_trades_per_hour = 12
+max_tick_age_ms = 2500
+max_tick_feed_lag_ms = 10000
 risk_day_timezone = "America/New_York"
 
 [polymarket]

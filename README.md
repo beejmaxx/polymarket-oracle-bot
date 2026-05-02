@@ -48,6 +48,8 @@ After a paper run, summarize telemetry:
 
 ```bash
 scripts/analyze_telemetry.py data/events.jsonl
+scripts/replay_telemetry.py --config config.toml data/events.jsonl
+scripts/generate_paper_report.py --config config.toml --events data/events.jsonl --db data/paper_run.sqlite3
 ```
 
 To compare local Python and Rust signal-loop overhead:
@@ -92,7 +94,12 @@ Use the value appropriate for the account.
   expiry.
 - Live settlement tracking first checks Gamma resolution/outcome prices, then
   falls back to local Chainlink settlement only for provisional tracking.
+- Risk controls include max daily drawdown, max position notional, max open
+  exposure, max trades per hour, stale tick age, and max Chainlink feed lag.
 - This is execution infrastructure, not a profitability claim.
+
+Client-facing operational docs live in `docs/RUNBOOK.md` and
+`docs/CLIENT_HANDOFF.md`.
 
 ## Rust Hot-Path Skeleton
 

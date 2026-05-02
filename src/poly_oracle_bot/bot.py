@@ -179,6 +179,9 @@ class Bot:
                                 "active": market.active,
                                 "closed": market.closed,
                                 "accepting_orders": market.accepting_orders,
+                                "tick_size": market.tick_size,
+                                "min_order_size": market.min_order_size,
+                                "neg_risk": market.neg_risk,
                                 "price_to_beat": market.price_to_beat,
                                 "up_token_id": market.tokens["Up"],
                                 "down_token_id": market.tokens["Down"],
@@ -249,7 +252,9 @@ class Bot:
                     )
             if not accepted_signal:
                 continue
-            size = self.risk.size_for_signal(signal, market)
+            open_exposure = sum(position.cost_usd for position in self.positions.values())
+            trades_last_hour = self.storage.trades_opened_since(now_ms - 3_600_000)
+            size = self.risk.size_for_signal(signal, market, open_exposure, trades_last_hour)
             trace.mark("risk_size")
             if not size.accepted:
                 rejected = self._replace_signal_reason(signal, size.reason)

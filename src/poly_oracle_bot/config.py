@@ -65,6 +65,10 @@ class RiskConfig:
     max_entry_price: float = 0.92
     min_elapsed_seconds: float = 1.0
     max_seconds_to_expiry: float = 8.0
+    max_open_exposure_usd: float = 100.0
+    max_trades_per_hour: int = 12
+    max_tick_age_ms: int = 2500
+    max_tick_feed_lag_ms: int = 10_000
     risk_day_timezone: str = "America/New_York"
 
 

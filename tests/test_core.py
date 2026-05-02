@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from poly_oracle_bot.config import AppConfig, TradingConfig
+from poly_oracle_bot.config import AppConfig, RiskConfig, TradingConfig
 from poly_oracle_bot.execution import LiveExecutor, _OrderApi, _is_immediate_fill, live_executor_dry_run
 from poly_oracle_bot.feeds import ChainlinkRTDSFeed
 from poly_oracle_bot.models import MarketWindow, Position, PriceTick, Quote
@@ -93,6 +93,47 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(signal.reason, "accepted")
         size = RiskManager(cfg.risk).size_for_signal(signal, market)
         self.assertTrue(size.accepted)
+
+    def test_signal_rejects_stale_oracle_tick(self) -> None:
+        cfg = AppConfig()
+        market = _market()
+        market.price_to_beat = 100.0
+        tick = PriceTick("BTC", "btc/usd", 101.0, 1777738500000, 1777738500000)
+        quote = Quote("up-token", best_ask=0.55)
+        signal = SignalEngine(cfg.risk).evaluate(market, tick, quote, now_ms=1777738510000)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.reason, "oracle tick stale")
+
+    def test_signal_records_distance_rejection(self) -> None:
+        cfg = AppConfig()
+        market = _market()
+        market.price_to_beat = 100.0
+        tick = PriceTick("BTC", "btc/usd", 100.01, 1777738510000, 1777738510000)
+        quote = Quote("up-token", best_ask=0.55)
+        signal = SignalEngine(cfg.risk).evaluate(market, tick, quote, now_ms=1777738510000)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.reason, "distance below threshold")
+
+    def test_risk_limits_open_exposure_and_trade_rate(self) -> None:
+        cfg = RiskConfig(max_open_exposure_usd=10.0, max_trades_per_hour=2)
+        manager = RiskManager(cfg)
+        market = _market()
+        market.price_to_beat = 100.0
+        tick = PriceTick("BTC", "btc/usd", 101.0, 1777738510000, 1777738510000)
+        quote = Quote("up-token", best_ask=0.55)
+        signal = SignalEngine(cfg).evaluate(market, tick, quote, now_ms=1777738510000)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(
+            manager.size_for_signal(signal, market, open_exposure_usd=10.0).reason,
+            "max_open_exposure_usd limit active",
+        )
+        self.assertEqual(
+            manager.size_for_signal(signal, market, trades_opened_last_hour=2).reason,
+            "max_trades_per_hour limit active",
+        )
 
     def test_settlement(self) -> None:
         pos = Position(
@@ -224,6 +265,9 @@ class CoreTests(unittest.TestCase):
 
     def test_executor_dry_run_signs_without_posting(self) -> None:
         class FakeClient:
+            def get_balance_allowance(self, _params: object) -> dict[str, str]:
+                return {"balance": "1000000", "allowance": "1000000"}
+
             def create_market_order(self, order_args: object, options: object | None = None) -> dict[str, bool]:
                 return {"signed": True}
 
@@ -278,12 +322,21 @@ def _fake_order_api() -> _OrderApi:
         def __init__(self, **_kwargs: object) -> None:
             pass
 
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
     return _OrderApi(
         variant="v2",
         market_order_args=FakeOrderArgs,
         partial_options=FakeOptions,
         order_type=FakeOrderType,
         buy_side="BUY",
+        balance_allowance_params=FakeBalanceAllowanceParams,
+        asset_type=FakeAssetType,
     )
 
 

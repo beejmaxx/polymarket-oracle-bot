@@ -51,10 +51,9 @@ class ChainlinkRTDSFeed:
             "subscriptions": [
                 {
                     "topic": "crypto_prices_chainlink",
-                    "type": "update",
-                    "filters": json.dumps({"symbol": symbol}),
+                    "type": "*",
+                    "filters": "",
                 }
-                for symbol in sorted(self.symbols_by_asset)
             ],
         }
 

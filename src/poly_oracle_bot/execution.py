@@ -34,6 +34,8 @@ class _OrderApi:
     partial_options: Any
     order_type: Any
     buy_side: Any
+    balance_allowance_params: Any
+    asset_type: Any
 
 
 class PaperExecutor:
@@ -207,6 +209,21 @@ def live_executor_dry_run(cfg: AppConfig, market: MarketWindow) -> ExecutorDryRu
         )
     timings["client"] = _elapsed_ms(client_started)
 
+    balance_started = time.perf_counter_ns()
+    balance_summary = "balance_check=skipped"
+    try:
+        balance_summary = _balance_allowance_summary(client, api)
+    except Exception as exc:
+        timings["balance"] = _elapsed_ms(balance_started)
+        timings["total"] = _elapsed_ms(total_started)
+        return ExecutorDryRunResult(
+            False,
+            api.variant,
+            f"variant={api.variant}; balance/allowance check failed: {exc}; no order submitted",
+            timings,
+        )
+    timings["balance"] = _elapsed_ms(balance_started)
+
     args_started = time.perf_counter_ns()
     amount_usd = max(5.0, cfg.risk.min_order_usd, market.min_order_size)
     price = _round_buy_limit(min(0.99, cfg.risk.max_entry_price), market.tick_size)
@@ -241,7 +258,8 @@ def live_executor_dry_run(cfg: AppConfig, market: MarketWindow) -> ExecutorDryRu
         api.variant,
         (
             f"variant={api.variant}; token={token_id[:10]}...; amount_usd={amount_usd:.2f}; "
-            f"price={price:.4f}; signed_type={signed_type}; no order submitted; "
+            f"price={price:.4f}; tick_size={market.tick_size}; min_order_size={market.min_order_size}; "
+            f"{balance_summary}; signed_type={signed_type}; no order submitted; "
             + _format_timings(timings)
         ),
         timings,
@@ -269,6 +287,8 @@ def _import_order_api() -> _OrderApi:
             partial_options=module.PartialCreateOrderOptions,
             order_type=module.OrderType,
             buy_side=constants.BUY,
+            balance_allowance_params=module.BalanceAllowanceParams,
+            asset_type=module.AssetType,
         )
     except ImportError as v2_exc:
         try:
@@ -280,9 +300,42 @@ def _import_order_api() -> _OrderApi:
                 partial_options=clob_types.PartialCreateOrderOptions,
                 order_type=clob_types.OrderType,
                 buy_side=constants.BUY,
+                balance_allowance_params=clob_types.BalanceAllowanceParams,
+                asset_type=clob_types.AssetType,
             )
         except ImportError as v1_exc:
             raise ImportError(f"v2 import failed ({v2_exc}); v1 import failed ({v1_exc})") from v1_exc
+
+
+def _balance_allowance_summary(client: Any, api: _OrderApi) -> str:
+    if not hasattr(client, "get_balance_allowance"):
+        return "balance_check=unavailable"
+    params = api.balance_allowance_params(asset_type=api.asset_type.COLLATERAL)
+    raw = client.get_balance_allowance(params)
+    if isinstance(raw, dict):
+        keys = ",".join(sorted(str(key) for key in raw.keys()))
+        balance = _first_numeric(raw, ("balance", "usdc_balance"))
+        allowance = _first_numeric(raw, ("allowance", "usdc_allowance"))
+        parts = [f"balance_keys={keys or 'none'}"]
+        if balance is not None:
+            parts.append(f"balance={balance:g}")
+        if allowance is not None:
+            parts.append(f"allowance={allowance:g}")
+        return "balance_check=ok " + " ".join(parts)
+    return f"balance_check=ok response_type={type(raw).__name__}"
+
+
+def _first_numeric(raw: dict[str, Any], names: tuple[str, ...]) -> float | None:
+    lowered = {str(key).lower(): value for key, value in raw.items()}
+    for name in names:
+        value = lowered.get(name)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _elapsed_ms(started_ns: int) -> float:

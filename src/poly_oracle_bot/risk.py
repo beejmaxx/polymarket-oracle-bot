@@ -19,9 +19,20 @@ class RiskManager:
     def apply_realized_pnl(self, pnl: float) -> None:
         self.realized_pnl_today += pnl
 
-    def size_for_signal(self, signal: Signal, market: MarketWindow) -> SizeDecision:
+    def size_for_signal(
+        self,
+        signal: Signal,
+        market: MarketWindow,
+        open_exposure_usd: float = 0.0,
+        trades_opened_last_hour: int = 0,
+    ) -> SizeDecision:
         if self.drawdown_blocked:
             return SizeDecision(0.0, 0.0, 0.0, "daily drawdown kill switch active")
+        if self.cfg.max_trades_per_hour > 0 and trades_opened_last_hour >= self.cfg.max_trades_per_hour:
+            return SizeDecision(0.0, 0.0, 0.0, "max_trades_per_hour limit active")
+        exposure_remaining = self.cfg.max_open_exposure_usd - max(0.0, open_exposure_usd)
+        if exposure_remaining <= 0.0:
+            return SizeDecision(0.0, 0.0, 0.0, "max_open_exposure_usd limit active")
 
         price = signal.ask_price
         if price <= 0.0 or price >= 1.0:
@@ -32,6 +43,7 @@ class RiskManager:
         cost = self.cfg.bankroll_usd * scaled_fraction
         cost = min(cost, self.cfg.max_position_usd)
         cost = min(cost, self.cfg.bankroll_usd * self.cfg.max_position_fraction)
+        cost = min(cost, exposure_remaining)
 
         remaining_dd = abs(self.cfg.max_daily_drawdown_usd) + self.realized_pnl_today
         if remaining_dd <= 0.0:
@@ -52,4 +64,3 @@ def risk_day_start_ms(now: datetime, timezone_name: str) -> int:
     local = now.astimezone(tz)
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     return int(start.timestamp() * 1000)
-

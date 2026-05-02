@@ -29,6 +29,7 @@ async def run_preflight(
     results: list[CheckResult] = [
         _path_writable("db_parent", db_path.parent),
         _path_writable("telemetry_parent", Path(cfg.telemetry.path).parent),
+        _risk_config_check(cfg),
         _live_credentials_check(cfg, executor_preflight),
         _telegram_check(cfg),
     ]
@@ -126,6 +127,38 @@ def _telegram_check(cfg: AppConfig) -> CheckResult:
     return CheckResult("telegram_config", True, "required variables present")
 
 
+def _risk_config_check(cfg: AppConfig) -> CheckResult:
+    risk = cfg.risk
+    problems = []
+    if risk.bankroll_usd <= 0.0:
+        problems.append("bankroll_usd must be positive")
+    if risk.min_order_usd <= 0.0:
+        problems.append("min_order_usd must be positive")
+    if risk.max_position_usd < risk.min_order_usd:
+        problems.append("max_position_usd below min_order_usd")
+    if risk.max_open_exposure_usd < risk.min_order_usd:
+        problems.append("max_open_exposure_usd below min_order_usd")
+    if not 0.0 < risk.min_entry_price < risk.max_entry_price < 1.0:
+        problems.append("entry price band must be inside (0, 1)")
+    if risk.max_daily_drawdown_usd <= 0.0:
+        problems.append("max_daily_drawdown_usd must be positive")
+    if risk.max_trades_per_hour < 0:
+        problems.append("max_trades_per_hour must be non-negative")
+    if risk.max_tick_age_ms <= 0 or risk.max_tick_feed_lag_ms <= 0:
+        problems.append("tick age/feed lag limits must be positive")
+    if problems:
+        return CheckResult("risk_config", False, "; ".join(problems))
+    return CheckResult(
+        "risk_config",
+        True,
+        (
+            f"max_position={risk.max_position_usd:.2f}, "
+            f"max_open_exposure={risk.max_open_exposure_usd:.2f}, "
+            f"max_trades_per_hour={risk.max_trades_per_hour}"
+        ),
+    )
+
+
 async def _chainlink_ws_check(
     url: str,
     asset: str,
@@ -143,8 +176,8 @@ async def _chainlink_ws_check(
                         "subscriptions": [
                             {
                                 "topic": "crypto_prices_chainlink",
-                                "type": "update",
-                                "filters": json.dumps({"symbol": symbol}),
+                                "type": "*",
+                                "filters": "",
                             }
                         ],
                     }

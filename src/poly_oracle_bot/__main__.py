@@ -40,7 +40,10 @@ def main() -> None:
         )
         print(format_results(results))
         raise SystemExit(0 if all(result.ok for result in results) else 1)
-    asyncio.run(Bot(cfg, args.db).run())
+    try:
+        asyncio.run(Bot(cfg, args.db).run())
+    except KeyboardInterrupt:
+        print("stopped")
 
 
 if __name__ == "__main__":

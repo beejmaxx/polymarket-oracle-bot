@@ -346,6 +346,18 @@ class Storage:
             ).fetchone()
         return float(row["pnl"] if row else 0.0)
 
+    def trades_opened_since(self, start_ms: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM trades
+                WHERE opened_at_ms >= ?
+                """,
+                (start_ms,),
+            ).fetchone()
+        return int(row["count"] if row else 0)
+
     def recent_trades(self, limit: int = 10) -> list[sqlite3.Row]:
         with self._lock:
             return list(
