@@ -12,6 +12,7 @@ from poly_oracle_bot.feeds import ChainlinkRTDSFeed
 from poly_oracle_bot.models import MarketWindow, Position, PriceTick, Quote
 from poly_oracle_bot.orderbook import OrderBookState
 from poly_oracle_bot.polymarket import parse_market_event
+from poly_oracle_bot.recorder import JsonlRecorder
 from poly_oracle_bot.risk import RiskManager
 from poly_oracle_bot.settlement import gamma_winning_outcome, local_winning_outcome, position_settlement_pnl
 from poly_oracle_bot.signal import SignalEngine
@@ -129,6 +130,23 @@ class CoreTests(unittest.TestCase):
             storage.insert_tick(PriceTick("BTC", "btc/usd", 100.0, 1, 2))
             self.assertEqual(storage.realized_pnl_since(0), 0.0)
             storage.close()
+
+    def test_jsonl_recorder(self) -> None:
+        async def run(path: Path) -> None:
+            cfg = AppConfig().telemetry
+            cfg.path = str(path)
+            cfg.flush_interval_seconds = 0.05
+            recorder = JsonlRecorder(cfg)
+            await recorder.start()
+            recorder.record("test_event", {"asset": "BTC", "value": 1})
+            await recorder.stop()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            asyncio.run(run(path))
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(rows[0]["event_type"], "test_event")
+            self.assertEqual(rows[0]["payload"]["asset"], "BTC")
 
     def test_chainlink_snapshot_parser(self) -> None:
         ticks = []

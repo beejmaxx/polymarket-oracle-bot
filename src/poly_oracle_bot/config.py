@@ -95,11 +95,25 @@ class TelegramConfig:
 
 
 @dataclass(slots=True)
+class TelemetryConfig:
+    enabled: bool = True
+    path: str = "data/events.jsonl"
+    queue_max: int = 20000
+    storage_queue_max: int = 20000
+    batch_size: int = 100
+    flush_interval_seconds: float = 0.25
+    record_ticks: bool = True
+    record_orderbook: bool = True
+    record_rejected_signals: bool = True
+
+
+@dataclass(slots=True)
 class AppConfig:
     trading: TradingConfig = field(default_factory=TradingConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     polymarket: PolymarketConfig = field(default_factory=PolymarketConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     assets: list[AssetConfig] = field(
         default_factory=lambda: [
             AssetConfig("BTC", "btc", "btc/usd"),
@@ -144,6 +158,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         risk=_build_dataclass(RiskConfig, _section(raw, "risk")),
         polymarket=_build_dataclass(PolymarketConfig, _section(raw, "polymarket")),
         telegram=_build_dataclass(TelegramConfig, _section(raw, "telegram")),
+        telemetry=_build_dataclass(TelemetryConfig, _section(raw, "telemetry")),
         assets=[
             _build_dataclass(AssetConfig, asset)
             for asset in raw.get("assets", [])
@@ -153,4 +168,3 @@ def load_config(path: Path | None = None) -> AppConfig:
     )
     cfg.validate()
     return cfg
-

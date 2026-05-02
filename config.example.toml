@@ -46,6 +46,17 @@ bot_token_env = "TELEGRAM_BOT_TOKEN"
 chat_id_env = "TELEGRAM_CHAT_ID"
 heartbeat_interval_seconds = 3600
 
+[telemetry]
+enabled = true
+path = "data/events.jsonl"
+queue_max = 20000
+storage_queue_max = 20000
+batch_size = 100
+flush_interval_seconds = 0.25
+record_ticks = true
+record_orderbook = true
+record_rejected_signals = true
+
 [[assets]]
 symbol = "BTC"
 slug_prefix = "btc"
@@ -69,4 +80,3 @@ symbol = "XRP"
 slug_prefix = "xrp"
 chainlink_symbol = "xrp/usd"
 enabled = true
-

@@ -14,10 +14,12 @@ from .feeds import ChainlinkRTDSFeed, PolymarketMarketStream
 from .models import MarketWindow, Position, PriceTick
 from .orderbook import OrderBookState
 from .polymarket import GammaClient
+from .recorder import JsonlRecorder, LatencyTrace
 from .risk import RiskManager, risk_day_start_ms
 from .settlement import gamma_winning_outcome, local_winning_outcome, position_settlement_pnl
 from .signal import SignalEngine
 from .storage import Storage
+from .storage_writer import AsyncStorageWriter
 from .telegram import TelegramNotifier
 
 
@@ -25,6 +27,7 @@ class Bot:
     def __init__(self, cfg: AppConfig, db_path: Path) -> None:
         self.cfg = cfg
         self.storage = Storage(db_path)
+        self.storage_writer = AsyncStorageWriter(self.storage, cfg.telemetry.storage_queue_max)
         self._risk_day_start_ms = risk_day_start_ms(
             datetime.now(timezone.utc), cfg.risk.risk_day_timezone
         )
@@ -32,6 +35,7 @@ class Bot:
         self.signal_engine = SignalEngine(cfg.risk)
         self.executor = executor_for_config(cfg)
         self.telegram = TelegramNotifier(cfg.telegram)
+        self.recorder = JsonlRecorder(cfg.telemetry)
         self.dashboard = Dashboard()
         self.orderbook = OrderBookState()
         self.market_stream = PolymarketMarketStream(cfg.polymarket, self.on_market_message)
@@ -42,7 +46,15 @@ class Bot:
         self._last_logged_signal: dict[tuple[str, str, str, str], int] = {}
 
     async def run(self) -> None:
-        self.storage.log_event("INFO", "startup", "bot starting", {"mode": self.cfg.trading.mode})
+        await self.recorder.start()
+        await self.storage_writer.start()
+        self.storage_writer.submit(
+            self.storage.log_event,
+            "INFO",
+            "startup",
+            "bot starting",
+            {"mode": self.cfg.trading.mode},
+        )
         await self.telegram.send(f"Polymarket oracle bot starting in {self.cfg.trading.mode} mode")
         symbols = {asset.symbol.upper(): asset.chainlink_symbol for asset in self.cfg.enabled_assets}
         price_feed = ChainlinkRTDSFeed(self.cfg.polymarket, symbols, self.on_tick)
@@ -61,6 +73,8 @@ class Bot:
         finally:
             for task in tasks:
                 task.cancel()
+            await self.recorder.stop()
+            await self.storage_writer.stop()
             self.storage.close()
 
     async def on_tick(self, tick: PriceTick) -> None:
@@ -69,23 +83,67 @@ class Bot:
         ticks.append(tick)
         if len(ticks) > 2000:
             del ticks[:1000]
-        await asyncio.to_thread(self.storage.insert_tick, tick)
+        if self.cfg.telemetry.record_ticks:
+            self.recorder.record(
+                "chainlink_tick",
+                {
+                    "asset": tick.asset,
+                    "symbol": tick.symbol,
+                    "price": tick.price,
+                    "feed_ts_ms": tick.feed_ts_ms,
+                    "received_ts_ms": tick.received_ts_ms,
+                    "feed_lag_ms": tick.received_ts_ms - tick.feed_ts_ms,
+                },
+            )
+        self.storage_writer.submit(self.storage.insert_tick, tick)
         for market in self.markets.values():
             if market.asset != tick.asset or market.price_to_beat is not None:
                 continue
             feed_ts = tick.feed_ts_ms / 1000.0
             if market.start_ts <= feed_ts <= market.start_ts + self.cfg.trading.opening_capture_grace_seconds:
                 market.price_to_beat = tick.price
-                await asyncio.to_thread(self.storage.upsert_market, market)
-                self.storage.log_event(
+                self.storage_writer.submit(self.storage.upsert_market, market)
+                self.storage_writer.submit(
+                    self.storage.log_event,
                     "INFO",
                     "price_to_beat",
                     f"captured {market.asset} opening price",
                     {"slug": market.slug, "price_to_beat": tick.price},
                 )
+                self.recorder.record(
+                    "price_to_beat",
+                    {
+                        "asset": market.asset,
+                        "slug": market.slug,
+                        "start_ts": market.start_ts,
+                        "price_to_beat": tick.price,
+                        "feed_ts_ms": tick.feed_ts_ms,
+                    },
+                )
 
     async def on_market_message(self, message: dict[str, Any]) -> None:
-        self.orderbook.update_from_message(message)
+        quotes = self.orderbook.update_from_message(message)
+        if self.cfg.telemetry.record_orderbook and quotes:
+            event_ts = _int_or_none(message.get("timestamp"))
+            self.recorder.record(
+                "clob_quote_update",
+                {
+                    "event_type": message.get("event_type"),
+                    "timestamp": event_ts,
+                    "lag_ms": int(time.time() * 1000) - event_ts if event_ts else None,
+                    "quotes": [
+                        {
+                            "token_id": quote.token_id,
+                            "best_bid": quote.best_bid,
+                            "best_ask": quote.best_ask,
+                            "bid_size": quote.bid_size,
+                            "ask_size": quote.ask_size,
+                            "ts_ms": quote.ts_ms,
+                        }
+                        for quote in quotes
+                    ],
+                },
+            )
 
     async def market_poll_loop(self) -> None:
         async with GammaClient(self.cfg.polymarket) as gamma:
@@ -106,7 +164,23 @@ class Bot:
                         if market.price_to_beat is None:
                             self._try_backfill_price_to_beat(market)
                         self.markets[market.key] = market
-                        await asyncio.to_thread(self.storage.upsert_market, market)
+                        self.storage_writer.submit(self.storage.upsert_market, market)
+                        self.recorder.record(
+                            "market_window",
+                            {
+                                "asset": market.asset,
+                                "slug": market.slug,
+                                "condition_id": market.condition_id,
+                                "start_ts": market.start_ts,
+                                "end_ts": market.end_ts,
+                                "active": market.active,
+                                "closed": market.closed,
+                                "accepting_orders": market.accepting_orders,
+                                "price_to_beat": market.price_to_beat,
+                                "up_token_id": market.tokens["Up"],
+                                "down_token_id": market.tokens["Down"],
+                            },
+                        )
                     asset_ids = {
                         token_id
                         for market in self.markets.values()
@@ -115,7 +189,7 @@ class Bot:
                     }
                     await self.market_stream.set_asset_ids(asset_ids)
                 except Exception as exc:
-                    self.storage.log_event("ERROR", "market_poll", str(exc))
+                    self.storage_writer.submit(self.storage.log_event, "ERROR", "market_poll", str(exc))
                 await asyncio.sleep(self.cfg.trading.market_poll_interval_seconds)
 
     async def signal_loop(self) -> None:
@@ -123,7 +197,7 @@ class Bot:
             try:
                 await self._evaluate_once()
             except Exception as exc:
-                self.storage.log_event("ERROR", "signal_loop", str(exc))
+                self.storage_writer.submit(self.storage.log_event, "ERROR", "signal_loop", str(exc))
             await asyncio.sleep(self.cfg.trading.signal_interval_seconds)
 
     async def _evaluate_once(self) -> None:
@@ -140,23 +214,73 @@ class Bot:
             quote = self.orderbook.quote(token_id) if token_id else None
             if quote is None:
                 continue
+            trace = LatencyTrace()
             signal = self.signal_engine.evaluate(market, tick, quote, now_ms=now_ms)
+            trace.mark("signal_eval")
             if signal is None:
                 continue
             accepted_signal = signal.reason == "accepted"
             if self._should_log_signal(signal.asset, signal.slug, signal.outcome, signal.reason, now_ms):
-                await asyncio.to_thread(self.storage.insert_signal, signal, accepted_signal)
+                self.storage_writer.submit(self.storage.insert_signal, signal, accepted_signal)
+                if accepted_signal or self.cfg.telemetry.record_rejected_signals:
+                    self.recorder.record(
+                        "signal",
+                        {
+                            "asset": signal.asset,
+                            "slug": signal.slug,
+                            "condition_id": signal.condition_id,
+                            "outcome": signal.outcome,
+                            "token_id": signal.token_id,
+                            "start_ts": signal.start_ts,
+                            "end_ts": signal.end_ts,
+                            "price_to_beat": signal.price_to_beat,
+                            "observed_price": signal.observed_price,
+                            "distance_bps": signal.distance_bps,
+                            "estimated_prob": signal.estimated_prob,
+                            "ask_price": signal.ask_price,
+                            "edge": signal.edge,
+                            "reason": signal.reason,
+                            "accepted": accepted_signal,
+                            "latency": trace.finish(),
+                        },
+                    )
             if not accepted_signal:
                 continue
             size = self.risk.size_for_signal(signal, market)
+            trace.mark("risk_size")
             if not size.accepted:
                 rejected = self._replace_signal_reason(signal, size.reason)
-                await asyncio.to_thread(self.storage.insert_signal, rejected, False)
+                self.storage_writer.submit(self.storage.insert_signal, rejected, False)
+                self.recorder.record(
+                    "signal_sizing_reject",
+                    {
+                        "asset": rejected.asset,
+                        "slug": rejected.slug,
+                        "outcome": rejected.outcome,
+                        "reason": rejected.reason,
+                        "sized_cost_usd": size.cost_usd,
+                        "kelly_fraction": size.kelly_fraction,
+                        "latency": trace.finish(),
+                    },
+                )
                 continue
             result = await self.executor.submit(signal, size, market)
+            trace.mark("order_submit")
             if not result.filled:
                 rejected = self._replace_signal_reason(signal, result.message)
-                await asyncio.to_thread(self.storage.insert_signal, rejected, False)
+                self.storage_writer.submit(self.storage.insert_signal, rejected, False)
+                self.recorder.record(
+                    "order_reject",
+                    {
+                        "asset": rejected.asset,
+                        "slug": rejected.slug,
+                        "outcome": rejected.outcome,
+                        "reason": rejected.reason,
+                        "cost_usd": size.cost_usd,
+                        "shares": size.shares,
+                        "latency": trace.finish(),
+                    },
+                )
                 continue
             position = Position(
                 trade_id=str(uuid.uuid4()),
@@ -177,7 +301,22 @@ class Bot:
                 opened_at_ms=now_ms,
             )
             self.positions[market.key] = position
-            await asyncio.to_thread(self.storage.open_trade, position)
+            self.storage_writer.submit(self.storage.open_trade, position)
+            self.recorder.record(
+                "position_open",
+                {
+                    "trade_id": position.trade_id,
+                    "mode": position.mode,
+                    "asset": position.asset,
+                    "slug": position.slug,
+                    "outcome": position.outcome,
+                    "shares": position.shares,
+                    "entry_price": position.entry_price,
+                    "cost_usd": position.cost_usd,
+                    "order_id": position.order_id,
+                    "latency": trace.finish(),
+                },
+            )
             await self.telegram.send(
                 f"OPEN {position.mode} {position.asset} {position.outcome} "
                 f"{position.shares:.4f} @ {position.entry_price:.3f} "
@@ -190,7 +329,7 @@ class Bot:
                 try:
                     await self._settle_once(gamma)
                 except Exception as exc:
-                    self.storage.log_event("ERROR", "settlement_loop", str(exc))
+                    self.storage_writer.submit(self.storage.log_event, "ERROR", "settlement_loop", str(exc))
                 await asyncio.sleep(self.cfg.trading.settlement_poll_interval_seconds)
 
     async def _settle_once(self, gamma: GammaClient) -> None:
@@ -214,7 +353,7 @@ class Bot:
                 winning = local_winning_outcome(position.price_to_beat, tick.price)
             pnl = position_settlement_pnl(position, winning)
             closed_at_ms = int(time.time() * 1000)
-            await asyncio.to_thread(
+            self.storage_writer.submit(
                 self.storage.close_trade,
                 position.trade_id,
                 closed_at_ms,
@@ -225,6 +364,23 @@ class Bot:
             )
             self.risk.apply_realized_pnl(pnl)
             del self.positions[key]
+            self.recorder.record(
+                "position_close",
+                {
+                    "trade_id": position.trade_id,
+                    "mode": position.mode,
+                    "asset": position.asset,
+                    "slug": position.slug,
+                    "outcome": position.outcome,
+                    "winning_outcome": winning,
+                    "entry_price": position.entry_price,
+                    "shares": position.shares,
+                    "cost_usd": position.cost_usd,
+                    "exit_oracle_price": tick.price,
+                    "realized_pnl": pnl,
+                    "settlement_source": source,
+                },
+            )
             await self.telegram.send(
                 f"CLOSE {position.mode} {position.asset} {position.outcome} "
                 f"winner={winning} pnl={pnl:.2f} source={source} slug={position.slug}"
@@ -299,9 +455,19 @@ class Bot:
             return
         self._risk_day_start_ms = current
         self.risk.realized_pnl_today = self.storage.realized_pnl_since(current)
-        self.storage.log_event(
+        self.storage_writer.submit(
+            self.storage.log_event,
             "INFO",
             "risk_day_reset",
             "risk day rolled; reloaded realized pnl",
             {"realized_pnl_today": self.risk.realized_pnl_today},
         )
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None

@@ -34,6 +34,11 @@ The dashboard prints prices, active markets, open positions, and recent trades.
 SQLite tables record markets, Chainlink ticks, signals, trades, and operational
 events.
 
+The Python runtime is the primary implementation path. It also writes optional
+off-hot-path JSONL telemetry to `data/events.jsonl`, including normalized ticks,
+quote updates, markets, signals, positions, and latency spans around the
+signal-to-order path.
+
 ## Live Credentials
 
 Live mode expects these environment variables:
@@ -76,4 +81,7 @@ Validation:
 cargo test --workspace
 ```
 
-Live order signing/submission is intentionally not implemented in Rust yet. The next step is parity logging against the Python bot, then a direct FOK/FAK execution client.
+Live order signing/submission is intentionally not implemented in Rust yet. The
+current plan is to keep Python as the primary runtime and use the Rust skeleton
+only as a reference/backup path unless latency measurements prove Python cannot
+meet the execution target.
